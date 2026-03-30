@@ -17,14 +17,15 @@ type LyricsClient struct {
 
 // Lyrics contains lyrics data
 type Lyrics struct {
-	Plain      string `json:"plain"`      // Plain text lyrics
-	Synced     string `json:"synced"`     // LRC format synced lyrics
-	Source     string `json:"source"`     // Source (e.g., "lrclib")
-	HasSynced  bool   `json:"hasSynced"`  // Whether synced lyrics are available
-	TrackName  string `json:"trackName"`  // Track name from API
-	ArtistName string `json:"artistName"` // Artist name from API
-	AlbumName  string `json:"albumName"`  // Album name from API
-	Duration   int    `json:"duration"`   // Duration in seconds
+	Plain        string `json:"plain"`        // Plain text lyrics
+	Synced       string `json:"synced"`       // LRC format synced lyrics
+	Source       string `json:"source"`       // Source (e.g., "lrclib")
+	HasSynced    bool   `json:"hasSynced"`    // Whether synced lyrics are available
+	Instrumental bool   `json:"instrumental"` // Whether the track is instrumental
+	TrackName    string `json:"trackName"`    // Track name from API
+	ArtistName   string `json:"artistName"`   // Artist name from API
+	AlbumName    string `json:"albumName"`    // Album name from API
+	Duration     int    `json:"duration"`     // Duration in seconds
 }
 
 // lrclibResponse represents the API response from LRCLIB
@@ -153,6 +154,15 @@ func (lc *LyricsClient) searchFallback(title, artist string) (*Lyrics, error) {
 	}
 
 	if bestMatch == nil {
+		// Check if track appears to be instrumental based on title
+		if isLikelyInstrumental(title) {
+			return &Lyrics{
+				Source:       "lrclib",
+				Instrumental: true,
+				TrackName:    title,
+				ArtistName:   artist,
+			}, nil
+		}
 		return nil, fmt.Errorf("no suitable lyrics found for %s - %s", artist, title)
 	}
 
@@ -188,14 +198,15 @@ func (lc *LyricsClient) isBetterMatch(candidate, current *lrclibResponse, title,
 // convertResponse converts API response to Lyrics struct
 func (lc *LyricsClient) convertResponse(r *lrclibResponse) *Lyrics {
 	lyrics := &Lyrics{
-		Plain:      r.PlainLyrics,
-		Synced:     r.SyncedLyrics,
-		Source:     "lrclib",
-		HasSynced:  r.SyncedLyrics != "",
-		TrackName:  r.TrackName,
-		ArtistName: r.ArtistName,
-		AlbumName:  r.AlbumName,
-		Duration:   r.Duration,
+		Plain:        r.PlainLyrics,
+		Synced:       r.SyncedLyrics,
+		Source:       "lrclib",
+		HasSynced:    r.SyncedLyrics != "",
+		Instrumental: r.Instrumental,
+		TrackName:    r.TrackName,
+		ArtistName:   r.ArtistName,
+		AlbumName:    r.AlbumName,
+		Duration:     r.Duration,
 	}
 
 	// If only synced lyrics available, extract plain version
@@ -227,6 +238,18 @@ func (lc *LyricsClient) syncedToPlain(synced string) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// isLikelyInstrumental returns true if the track title suggests it is instrumental.
+func isLikelyInstrumental(title string) bool {
+	lower := strings.ToLower(title)
+	markers := []string{"instrumental", "interlude", "skit", "intro", "outro", "acapella"}
+	for _, m := range markers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // FetchLyricsForFile fetches lyrics for a file based on its metadata

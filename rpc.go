@@ -1,9 +1,14 @@
 package core
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // RPCRequest represents an incoming JSON-RPC call.
@@ -167,6 +172,20 @@ func (c *Core) dispatch(method string, params json.RawMessage) (interface{}, err
 			return nil, c.downloadManager.QueueDownloadWithISRC(p.TrackID, p.OutputDir, p.Title, p.Artist, p.ISRC)
 		}
 		return nil, c.downloadManager.QueueDownload(p.TrackID, p.OutputDir, p.Title, p.Artist)
+
+	case "queueSingleWithQuality":
+		var p struct {
+			TrackID   int    `json:"trackId"`
+			OutputDir string `json:"outputDir"`
+			Title     string `json:"title"`
+			Artist    string `json:"artist"`
+			ISRC      string `json:"isrc"`
+			Quality   string `json:"quality"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		return nil, c.downloadManager.queueDownloadFullWithQuality(p.TrackID, p.OutputDir, p.Title, p.Artist, p.ISRC, 0, "", "", p.Quality)
 
 	case "getQueueStatus":
 		return map[string]interface{}{
@@ -379,6 +398,69 @@ func (c *Core) dispatch(method string, params json.RawMessage) (interface{}, err
 		c.qobuzSource.SetCredentials(p.AppID, p.AppSecret, p.AuthToken)
 		return map[string]string{"status": "ok"}, nil
 
+	// ── Extensions ─────────────────────────────────────────
+	case "getExtensions":
+		return c.extensionManager.GetInstalled(), nil
+
+	case "installExtension":
+		var p struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		return c.extensionManager.Install(p.URL)
+
+	case "uninstallExtension":
+		var p struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		return nil, c.extensionManager.Uninstall(p.ID)
+
+	case "enableExtension":
+		var p struct {
+			ID      string `json:"id"`
+			Enabled bool   `json:"enabled"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		return nil, c.extensionManager.SetEnabled(p.ID, p.Enabled)
+
+	case "setExtensionAuth":
+		var p struct {
+			ID   string            `json:"id"`
+			Data map[string]string `json:"data"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		return nil, c.extensionManager.SetAuthData(p.ID, p.Data)
+
+	case "getExtensionRegistry":
+		var p struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if p.URL == "" {
+			p.URL = "https://raw.githubusercontent.com/kushiemoon-dev/flacidal-extensions/main/index.json"
+		}
+		resp, err := http.Get(p.URL)
+		if err != nil {
+			return nil, fmt.Errorf("registry fetch failed: %w", err)
+		}
+		defer resp.Body.Close()
+		var registry []map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&registry); err != nil {
+			return nil, fmt.Errorf("invalid registry: %w", err)
+		}
+		return registry, nil
+
 	// ── History ─────────────────────────────────────────────
 	case "getHistory":
 		if c.db == nil {
@@ -421,6 +503,55 @@ func (c *Core) dispatch(method string, params json.RawMessage) (interface{}, err
 			"total":    total,
 			"byMethod": byMethod,
 		}, nil
+
+	// ── Queue Persistence ──────────────────────────────────
+	case "persistQueue":
+		path := filepath.Join(GetDataDir(), "queue.json")
+		return nil, c.downloadManager.PersistQueue(path)
+
+	case "restoreQueue":
+		path := filepath.Join(GetDataDir(), "queue.json")
+		restored, err := c.downloadManager.RestoreQueue(path)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]int{"restored": restored}, nil
+
+	case "checkDownloaded":
+		var p struct {
+			ISRC string `json:"isrc"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if c.db == nil {
+			return map[string]bool{"downloaded": false}, nil
+		}
+		track, _ := c.db.GetCachedTrack(p.ISRC)
+		return map[string]bool{"downloaded": track != nil}, nil
+
+	// ── Cover Art ───────────────────────────────────────────
+	case "getEmbeddedCoverArt":
+		var p struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		// Look for companion .jpg file alongside the .flac
+		ext := filepath.Ext(p.Path)
+		jpgPath := strings.TrimSuffix(p.Path, ext) + ".jpg"
+		data, err := os.ReadFile(jpgPath)
+		if err != nil {
+			// Try cover.jpg in same directory
+			dirPath := filepath.Dir(p.Path)
+			data, err = os.ReadFile(filepath.Join(dirPath, "cover.jpg"))
+			if err != nil {
+				return map[string]string{"coverArt": ""}, nil
+			}
+		}
+		encoded := base64.StdEncoding.EncodeToString(data)
+		return map[string]string{"coverArt": encoded}, nil
 
 	default:
 		return nil, fmt.Errorf("unknown method: %s", method)
