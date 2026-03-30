@@ -108,6 +108,16 @@ make ios
 
 ---
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=kushiemoon-dev/flacidal-core&type=Date)](https://star-history.com/#kushiemoon-dev/flacidal-core&Date)
+
+### FLACidal Ecosystem
+
+[![Star History Chart](https://api.star-history.com/svg?repos=kushiemoon-dev/FLACidal,kushiemoon-dev/flacidal-core,kushiemoon-dev/FLACidal-Mobile&type=Date)](https://star-history.com/#kushiemoon-dev/FLACidal&kushiemoon-dev/flacidal-core&kushiemoon-dev/FLACidal-Mobile&Date)
+
+---
+
 ## Disclaimer
 
 This module is intended for **educational and personal use only**. It is not affiliated with Tidal, Qobuz, or any streaming service. Use responsibly and in accordance with local laws.
