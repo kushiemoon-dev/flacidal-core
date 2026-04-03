@@ -94,13 +94,21 @@ func NewCore(dataDir string) (*Core, error) {
 
 	// Set download options
 	c.downloader.SetOptions(DownloadOptions{
-		Quality:         config.DownloadQuality,
-		FileNameFormat:  config.FileNameFormat,
-		OrganizeFolders: config.OrganizeFolders,
-		EmbedCover:      config.EmbedCover,
-		SaveCoverFile:   config.SaveCoverFile,
-		AutoAnalyze:     config.AutoAnalyze,
-		SkipExisting:    config.SkipExisting,
+		Quality:              config.DownloadQuality,
+		FileNameFormat:       config.FileNameFormat,
+		OrganizeFolders:      config.OrganizeFolders,
+		FolderTemplate:       config.FolderTemplate,
+		EmbedCover:           config.EmbedCover,
+		SaveCoverFile:        config.SaveCoverFile,
+		SaveFolderCover:      config.SaveFolderCover,
+		AutoAnalyze:          config.AutoAnalyze,
+		AutoQualityFallback:  config.AutoQualityFallback,
+		QualityFallbackOrder: config.QualityOrder,
+		FirstArtistOnly:      config.FirstArtistOnly,
+		SkipExisting:         config.SkipExisting,
+		ArtistSeparator:      config.ArtistSeparator,
+		PlaylistSubfolder:    config.PlaylistSubfolder,
+		SaveLyricsFile:       config.SaveLyricsFile,
 	})
 
 	// Initialize download manager
