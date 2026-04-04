@@ -80,7 +80,7 @@ func FlacCallAsync(methodJSON *C.char, requestID C.int) {
 			errJSON := marshalAsyncResponse(int(requestID), marshalErr("NOT_INITIALIZED", "call FlacInit first"))
 			cstr := C.CString(errJSON)
 			C.invokeCallback(cstr)
-			C.free(unsafe.Pointer(cstr))
+			// Dart frees via FlacFree after reading
 		}
 		return
 	}
@@ -92,7 +92,7 @@ func FlacCallAsync(methodJSON *C.char, requestID C.int) {
 			resp := marshalAsyncResponse(id, result)
 			cstr := C.CString(resp)
 			C.invokeCallback(cstr)
-			C.free(unsafe.Pointer(cstr))
+			// Dart frees via FlacFree after reading
 		}
 	}()
 }
