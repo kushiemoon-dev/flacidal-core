@@ -858,8 +858,8 @@ func parsePlaylistItems(items []struct {
 // GetPlaylistFromProxy fetches playlist metadata and tracks via the v2.4 proxy endpoint pool.
 // Paginates automatically for playlists with more than 100 tracks.
 func (t *TidalHifiService) GetPlaylistFromProxy(playlistUUID string) (*TidalPlaylist, error) {
-	// First request — gets metadata + first batch of items
-	body, err := t.makeMetadataRequest("/playlist/?id=" + playlistUUID)
+	// First request — gets metadata + first batch of items (explicit limit to avoid proxy defaults)
+	body, err := t.makeMetadataRequest(fmt.Sprintf("/playlist/?id=%s&limit=100&offset=0", playlistUUID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch playlist: %w", err)
 	}
@@ -899,21 +899,33 @@ func (t *TidalHifiService) GetPlaylistFromProxy(playlistUUID string) (*TidalPlay
 			fmt.Sprintf("/playlist/?id=%s&limit=%d&offset=%d", playlistUUID, limit, offset),
 		)
 		if err != nil {
-			// Return what we have so far rather than failing entirely
+			if t.logger != nil {
+				t.logger.Warn(fmt.Sprintf("Playlist pagination stopped at offset %d/%d: %v", offset, totalTracks, err))
+			}
 			break
 		}
 
 		var pageResp playlistProxyResponse
 		if err := json.Unmarshal(pageBody, &pageResp); err != nil {
+			if t.logger != nil {
+				t.logger.Warn(fmt.Sprintf("Playlist pagination parse error at offset %d: %v", offset, err))
+			}
 			break
 		}
 
 		pageTracks := parsePlaylistItems(pageResp.Items)
 		if len(pageTracks) == 0 {
-			break // No more items
+			if t.logger != nil {
+				t.logger.Warn(fmt.Sprintf("Playlist pagination: empty page at offset %d/%d", offset, totalTracks))
+			}
+			break
 		}
 		allTracks = append(allTracks, pageTracks...)
 		offset += len(pageResp.Items)
+	}
+
+	if t.logger != nil && len(allTracks) < totalTracks {
+		t.logger.Warn(fmt.Sprintf("Playlist incomplete: got %d/%d tracks", len(allTracks), totalTracks))
 	}
 
 	return &TidalPlaylist{
