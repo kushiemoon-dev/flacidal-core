@@ -673,6 +673,45 @@ func (c *Core) dispatch(method string, params json.RawMessage) (interface{}, err
 		}
 		return nil, c.extensionManager.SetAuthData(p.ID, p.Data)
 
+	case "getDownloadFallbacks":
+		return c.extensionManager.GetDownloadExtensions(), nil
+
+	case "getExtensionSources":
+		return c.extensionManager.GetRegistrySources(), nil
+
+	case "addExtensionSource":
+		var p struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if err := c.extensionManager.AddRegistrySource(p.URL); err != nil {
+			return nil, err
+		}
+		return map[string]string{"status": "ok"}, nil
+
+	case "removeExtensionSource":
+		var p struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if err := c.extensionManager.RemoveRegistrySource(p.URL); err != nil {
+			return nil, err
+		}
+		return map[string]string{"status": "ok"}, nil
+
+	case "fetchRegistryFromGitHub":
+		var p struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		return c.extensionManager.FetchRegistryFromGitHub(p.URL)
+
 	case "getExtensionRegistry":
 		var p struct {
 			URL string `json:"url"`
@@ -785,6 +824,67 @@ func (c *Core) dispatch(method string, params json.RawMessage) (interface{}, err
 		}
 		encoded := base64.StdEncoding.EncodeToString(data)
 		return map[string]string{"coverArt": encoded}, nil
+
+	// ── YouTube/Cobalt Fallback ────────────────────────────
+	case "downloadFromYouTube":
+		var p struct {
+			URL        string `json:"url"`
+			OutputPath string `json:"outputPath"`
+			Format     string `json:"format"` // "opus" or "mp3"
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if p.Format == "" {
+			p.Format = "opus"
+		}
+		cobalt := NewCobaltSource()
+		if err := cobalt.Download(p.URL, p.OutputPath, p.Format); err != nil {
+			return nil, err
+		}
+		return map[string]interface{}{
+			"success": true,
+			"quality": "lossy",
+			"format":  p.Format,
+			"path":    p.OutputPath,
+		}, nil
+
+	// ── Deezer Enrichment ──────────────────────────────────
+	case "enrichFromDeezer":
+		var p struct {
+			ISRC string `json:"isrc"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		deezer := NewDeezerClient()
+		meta, err := deezer.EnrichByISRC(p.ISRC)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{
+			"genre":     meta.Genre,
+			"label":     meta.Label,
+			"copyright": meta.Copyright,
+		}, nil
+
+	// ── Multi-service URL Resolution ───────────────────────
+	case "resolveURL":
+		var p struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		resolved, err := ResolveToTidal(p.URL)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{
+			"tidalId":         resolved.TidalID,
+			"type":            resolved.Type,
+			"originalService": resolved.OriginalService,
+		}, nil
 
 	default:
 		return nil, fmt.Errorf("unknown method: %s", method)

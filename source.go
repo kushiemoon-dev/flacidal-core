@@ -169,10 +169,11 @@ func (sm *SourceManager) GetSourcesInfo() []SourceInfo {
 
 // URL detection helpers
 var (
-	tidalURLPattern  = regexp.MustCompile(`(?:listen\.)?tidal\.com`)
-	qobuzURLPattern  = regexp.MustCompile(`(?:play|open)\.qobuz\.com`)
-	deezerURLPattern = regexp.MustCompile(`(?:www\.)?deezer\.com`)
-	amazonURLPattern = regexp.MustCompile(`music\.amazon\.`)
+	tidalURLPattern        = regexp.MustCompile(`(?:listen\.)?tidal\.com`)
+	qobuzURLPattern        = regexp.MustCompile(`(?:play|open)\.qobuz\.com`)
+	deezerURLPattern       = regexp.MustCompile(`(?:www\.)?deezer\.com|deezer\.page\.link`)
+	amazonURLPattern       = regexp.MustCompile(`music\.amazon\.`)
+	youtubeMusicURLPattern = regexp.MustCompile(`music\.youtube\.com`)
 )
 
 // DetectSourceFromURL returns the source name based on URL pattern
@@ -184,6 +185,8 @@ func DetectSourceFromURL(rawURL string) string {
 		return "qobuz"
 	case deezerURLPattern.MatchString(rawURL):
 		return "deezer"
+	case youtubeMusicURLPattern.MatchString(rawURL):
+		return "youtube_music"
 	case amazonURLPattern.MatchString(rawURL):
 		return "amazon"
 	default:

@@ -46,7 +46,10 @@ type DownloadManager struct {
 	generateM3U8    bool
 	batches         map[string]*m3u8Batch
 	batchMu         sync.Mutex
-	skipUnavailable bool
+	skipUnavailable   bool
+	autoSelectService bool
+	youtubeEnabled    bool
+	cobaltSource      *CobaltSource
 }
 
 // DownloadJob represents a single download task
@@ -131,6 +134,52 @@ func (dm *DownloadManager) SetGenerateM3U8(enabled bool) {
 // SetSkipUnavailable configures whether unavailable tracks are silently skipped.
 func (dm *DownloadManager) SetSkipUnavailable(skip bool) {
 	dm.skipUnavailable = skip
+}
+
+// SetAutoSelectService enables automatic source selection per track.
+func (dm *DownloadManager) SetAutoSelectService(enabled bool) {
+	dm.autoSelectService = enabled
+}
+
+// SetYouTubeFallback enables or disables YouTube/Cobalt lossy fallback.
+func (dm *DownloadManager) SetYouTubeFallback(enabled bool) {
+	dm.youtubeEnabled = enabled
+	if enabled && dm.cobaltSource == nil {
+		dm.cobaltSource = NewCobaltSource()
+	}
+}
+
+// selectBestService chooses the best download source for a track.
+// Fallback chain: preferred/explicit source → other lossless sources → youtube (if enabled).
+func (dm *DownloadManager) selectBestService(job *DownloadJob) string {
+	// If a source is explicitly set on the job, respect it
+	if job.Source != "" {
+		return job.Source
+	}
+
+	// When auto-select is disabled, default to tidal
+	if !dm.autoSelectService {
+		return "tidal"
+	}
+
+	// Prefer the first available lossless source from sourceOrder
+	for _, s := range dm.sourceOrder {
+		switch s {
+		case "tidal":
+			return "tidal"
+		case "qobuz":
+			if dm.qobuzSource != nil && dm.qobuzSource.IsAvailable() {
+				return "qobuz"
+			}
+		}
+	}
+
+	// Last resort: YouTube lossy fallback
+	if dm.youtubeEnabled {
+		return "youtube"
+	}
+
+	return "tidal"
 }
 
 // Start begins the worker pool

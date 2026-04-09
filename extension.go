@@ -16,16 +16,19 @@ import (
 
 // ExtensionManifest defines an extension's capabilities.
 type ExtensionManifest struct {
-	ID            string        `json:"id"`
-	Name          string        `json:"name"`
-	Version       string        `json:"version"`
-	MinAppVersion string        `json:"minAppVersion"`
-	Author        string        `json:"author"`
-	Description   string        `json:"description,omitempty"`
-	Capabilities  []string      `json:"capabilities"` // "source", "metadata", "resolver"
-	Permissions   []string      `json:"permissions"`  // "network"
-	SourceConfig  *SourceExtCfg `json:"sourceConfig,omitempty"`
-	AuthFields    []AuthField   `json:"authFields,omitempty"`
+	ID               string        `json:"id"`
+	Name             string        `json:"name"`
+	Version          string        `json:"version"`
+	MinAppVersion    string        `json:"minAppVersion"`
+	Author           string        `json:"author"`
+	Description      string        `json:"description,omitempty"`
+	Category         string        `json:"category,omitempty"` // "download", "metadata", "lyrics", "utility"
+	Capabilities     []string      `json:"capabilities"`       // "source", "metadata", "resolver"
+	Permissions      []string      `json:"permissions"`        // "network"
+	CanDownload      bool          `json:"canDownload,omitempty"`
+	DownloadPriority int           `json:"downloadPriority,omitempty"` // lower = tried first, 0 = disabled
+	SourceConfig     *SourceExtCfg `json:"sourceConfig,omitempty"`
+	AuthFields       []AuthField   `json:"authFields,omitempty"`
 }
 
 // SourceExtCfg describes how an extension source fetches data via HTTP.
@@ -63,25 +66,28 @@ type Extension struct {
 
 // ExtensionManager handles extension lifecycle.
 type ExtensionManager struct {
-	extensions map[string]*Extension
-	dataDir    string
-	mu         sync.RWMutex
-	httpClient *http.Client
-	logger     *LogBuffer
+	extensions       map[string]*Extension
+	registrySources  []string
+	dataDir          string
+	mu               sync.RWMutex
+	httpClient       *http.Client
+	logger           *LogBuffer
 }
 
 // NewExtensionManager creates a manager that persists extensions under dataDir/extensions.
 func NewExtensionManager(dataDir string, logger *LogBuffer) *ExtensionManager {
 	em := &ExtensionManager{
-		extensions: make(map[string]*Extension),
-		dataDir:    filepath.Join(dataDir, "extensions"),
-		httpClient: &http.Client{Timeout: 15 * time.Second},
-		logger:     logger,
+		extensions:      make(map[string]*Extension),
+		registrySources: []string{},
+		dataDir:         filepath.Join(dataDir, "extensions"),
+		httpClient:      &http.Client{Timeout: 15 * time.Second},
+		logger:          logger,
 	}
 	if err := os.MkdirAll(em.dataDir, 0755); err != nil {
 		logger.Warn("Could not create extensions dir: " + err.Error())
 	}
 	em.loadInstalled()
+	em.loadSources()
 	return em
 }
 
@@ -344,6 +350,155 @@ func (em *ExtensionManager) FetchFromExtension(ext *Extension, endpointTemplate 
 		return nil, fmt.Errorf("cannot decode response: %w", err)
 	}
 	return result, nil
+}
+
+// GetDownloadExtensions returns extensions capable of downloading, sorted by priority (lower first).
+func (em *ExtensionManager) GetDownloadExtensions() []Extension {
+	em.mu.RLock()
+	defer em.mu.RUnlock()
+
+	var result []Extension
+	for _, ext := range em.extensions {
+		if ext.Enabled && ext.Manifest.CanDownload && ext.Manifest.DownloadPriority > 0 {
+			result = append(result, *ext)
+		}
+	}
+	// Sort by priority ascending (lower = higher priority)
+	for i := 1; i < len(result); i++ {
+		for j := i; j > 0 && result[j].Manifest.DownloadPriority < result[j-1].Manifest.DownloadPriority; j-- {
+			result[j], result[j-1] = result[j-1], result[j]
+		}
+	}
+	return result
+}
+
+// loadSources reads persisted registry sources from sources.json.
+func (em *ExtensionManager) loadSources() {
+	data, err := os.ReadFile(filepath.Join(em.dataDir, "sources.json"))
+	if err != nil {
+		return
+	}
+	var sources []string
+	if err := json.Unmarshal(data, &sources); err == nil {
+		em.registrySources = sources
+	}
+}
+
+// saveSources persists registry sources to sources.json.
+func (em *ExtensionManager) saveSources() error {
+	data, err := json.MarshalIndent(em.registrySources, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(em.dataDir, "sources.json"), data, 0644)
+}
+
+// GetRegistrySources returns configured extension registry source URLs.
+func (em *ExtensionManager) GetRegistrySources() []string {
+	em.mu.RLock()
+	defer em.mu.RUnlock()
+	result := make([]string, len(em.registrySources))
+	copy(result, em.registrySources)
+	return result
+}
+
+// AddRegistrySource adds a GitHub repo URL as an extension source.
+func (em *ExtensionManager) AddRegistrySource(repoURL string) error {
+	em.mu.Lock()
+	defer em.mu.Unlock()
+
+	// Deduplicate
+	for _, s := range em.registrySources {
+		if s == repoURL {
+			return fmt.Errorf("source already exists: %s", repoURL)
+		}
+	}
+	em.registrySources = append(em.registrySources, repoURL)
+	return em.saveSources()
+}
+
+// RemoveRegistrySource removes a registry source URL.
+func (em *ExtensionManager) RemoveRegistrySource(repoURL string) error {
+	em.mu.Lock()
+	defer em.mu.Unlock()
+
+	newSources := make([]string, 0, len(em.registrySources))
+	found := false
+	for _, s := range em.registrySources {
+		if s == repoURL {
+			found = true
+			continue
+		}
+		newSources = append(newSources, s)
+	}
+	if !found {
+		return fmt.Errorf("source not found: %s", repoURL)
+	}
+	em.registrySources = newSources
+	return em.saveSources()
+}
+
+// FetchRegistryFromGitHub discovers extensions from a GitHub repository.
+// It calls the GitHub API to list files under the "extensions" directory,
+// then fetches and parses each manifest.json found.
+func (em *ExtensionManager) FetchRegistryFromGitHub(repoURL string) ([]ExtensionManifest, error) {
+	// Parse owner/repo from URL like "https://github.com/owner/repo"
+	repoURL = strings.TrimSuffix(repoURL, "/")
+	repoURL = strings.TrimSuffix(repoURL, ".git")
+	parts := strings.Split(repoURL, "/")
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("invalid GitHub repo URL: %s", repoURL)
+	}
+	owner := parts[len(parts)-2]
+	repo := parts[len(parts)-1]
+
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/extensions", owner, repo)
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("cannot create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := em.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GitHub API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
+	}
+
+	var entries []struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return nil, fmt.Errorf("cannot parse directory listing: %w", err)
+	}
+
+	var manifests []ExtensionManifest
+	for _, entry := range entries {
+		if entry.Type != "dir" {
+			continue
+		}
+		manifestURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/main/%s/manifest.json", owner, repo, entry.Path)
+		mResp, err := em.httpClient.Get(manifestURL)
+		if err != nil || mResp.StatusCode != http.StatusOK {
+			if mResp != nil {
+				mResp.Body.Close()
+			}
+			continue
+		}
+		var manifest ExtensionManifest
+		if err := json.NewDecoder(mResp.Body).Decode(&manifest); err == nil && manifest.ID != "" {
+			manifests = append(manifests, manifest)
+		}
+		mResp.Body.Close()
+	}
+
+	return manifests, nil
 }
 
 // ResolveJSONPath extracts a value from a nested map using dot notation (e.g. "data.title").

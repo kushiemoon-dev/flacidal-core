@@ -79,6 +79,12 @@ type Config struct {
 
 	// Network
 	ProxyURL string `json:"proxyUrl,omitempty"` // HTTP/SOCKS5 proxy e.g. "socks5://127.0.0.1:1080"
+
+	// YouTube/Cobalt fallback (lossy)
+	EnableYouTubeFallback bool `json:"enableYouTubeFallback"` // Enable lossy YouTube fallback via Cobalt
+
+	// Auto-select best download service per track
+	AutoSelectService bool `json:"autoSelectService"` // Automatically pick the best source per track
 }
 
 var defaultConfig = Config{
