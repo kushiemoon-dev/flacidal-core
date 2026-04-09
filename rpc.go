@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/base64"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -886,6 +887,24 @@ func (c *Core) dispatch(method string, params json.RawMessage) (interface{}, err
 			"originalService": resolved.OriginalService,
 		}, nil
 
+	// ── CSV Import ─────────────────────────────────────────
+	case "importCSV":
+		var p struct {
+			Path    string `json:"path"`
+			Quality string `json:"quality"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if p.Path == "" {
+			return nil, fmt.Errorf("path is required")
+		}
+		tracks, err := c.importCSV(p.Path, p.Quality)
+		if err != nil {
+			return nil, err
+		}
+		return tracks, nil
+
 	default:
 		return nil, fmt.Errorf("unknown method: %s", method)
 	}
@@ -927,6 +946,149 @@ func convertSearchResults(results []TidalHifiTrackResponse) []TidalTrack {
 		}
 	}
 	return tracks
+}
+
+// csvMatchResult describes a single row's match result from CSV import.
+type csvMatchResult struct {
+	TrackName  string      `json:"trackName"`
+	ArtistName string      `json:"artistName"`
+	AlbumName  string      `json:"albumName"`
+	ISRC       string      `json:"isrc"`
+	Matched    bool        `json:"matched"`
+	Track      *TidalTrack `json:"track,omitempty"`
+	Error      string      `json:"error,omitempty"`
+}
+
+// importCSV reads a CSV file and tries to match each row to a Tidal track.
+func (c *Core) importCSV(path, quality string) ([]csvMatchResult, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open CSV: %w", err)
+	}
+	defer f.Close()
+
+	reader := csv.NewReader(f)
+	reader.FieldsPerRecord = -1 // variable columns
+	reader.TrimLeadingSpace = true
+
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CSV: %w", err)
+	}
+	if len(records) < 2 {
+		return nil, fmt.Errorf("CSV must have a header row and at least one data row")
+	}
+
+	header := records[0]
+	colIdx := make(map[string]int)
+	for i, h := range header {
+		normalized := strings.ToLower(strings.TrimSpace(h))
+		colIdx[normalized] = i
+	}
+
+	// Map known column names (support both standard and Spotify export format)
+	trackCol := findCol(colIdx, "track name", "track_name", "title", "name", "song")
+	artistCol := findCol(colIdx, "artist name(s)", "artist_name(s)", "artist name", "artist", "artists")
+	albumCol := findCol(colIdx, "album name", "album_name", "album")
+	isrcCol := findCol(colIdx, "isrc")
+
+	if trackCol < 0 {
+		return nil, fmt.Errorf("CSV must have a 'Track Name' or 'Title' column")
+	}
+
+	var results []csvMatchResult
+	for _, row := range records[1:] {
+		r := csvMatchResult{}
+		if trackCol >= 0 && trackCol < len(row) {
+			r.TrackName = strings.TrimSpace(row[trackCol])
+		}
+		if artistCol >= 0 && artistCol < len(row) {
+			r.ArtistName = strings.TrimSpace(row[artistCol])
+		}
+		if albumCol >= 0 && albumCol < len(row) {
+			r.AlbumName = strings.TrimSpace(row[albumCol])
+		}
+		if isrcCol >= 0 && isrcCol < len(row) {
+			r.ISRC = strings.TrimSpace(row[isrcCol])
+		}
+
+		if r.TrackName == "" {
+			continue
+		}
+
+		// Try ISRC match first
+		if r.ISRC != "" {
+			track, err := c.downloader.SearchTrack(r.ISRC)
+			if err == nil && track != nil {
+				t := convertSingleSearchResult(*track)
+				r.Matched = true
+				r.Track = &t
+				results = append(results, r)
+				continue
+			}
+		}
+
+		// Fall back to title+artist search
+		query := r.TrackName
+		if r.ArtistName != "" {
+			query = r.ArtistName + " " + r.TrackName
+		}
+		track, err := c.downloader.SearchTrack(query)
+		if err != nil || track == nil {
+			r.Error = "no match found"
+			results = append(results, r)
+			continue
+		}
+		t := convertSingleSearchResult(*track)
+		r.Matched = true
+		r.Track = &t
+		results = append(results, r)
+	}
+
+	return results, nil
+}
+
+// findCol returns the column index for the first matching header name, or -1.
+func findCol(colIdx map[string]int, names ...string) int {
+	for _, name := range names {
+		if idx, ok := colIdx[name]; ok {
+			return idx
+		}
+	}
+	return -1
+}
+
+// convertSingleSearchResult converts a single Tidal search result to TidalTrack.
+func convertSingleSearchResult(r TidalHifiTrackResponse) TidalTrack {
+	artistStr := r.Artist.Name
+	var allArtists []string
+	for _, a := range r.Artists {
+		allArtists = append(allArtists, a.Name)
+	}
+	allArtistsStr := artistStr
+	if len(allArtists) > 0 {
+		allArtistsStr = strings.Join(allArtists, ", ")
+	}
+	coverURL := ""
+	if r.Album.Cover != "" {
+		coverURL = fmt.Sprintf("https://resources.tidal.com/images/%s/320x320.jpg",
+			FormatCoverUUID(r.Album.Cover))
+	}
+	return TidalTrack{
+		ID:          r.ID,
+		Title:       r.Title,
+		Artist:      artistStr,
+		Artists:     allArtistsStr,
+		Album:       r.Album.Title,
+		AlbumArtist: r.Album.Artist.Name,
+		Duration:    r.Duration,
+		ISRC:        r.ISRC,
+		CoverURL:    coverURL,
+		Explicit:    r.Explicit,
+		TrackNum:    r.TrackNumber,
+		DiscNum:     r.VolumeNumber,
+		ReleaseDate: r.Album.ReleaseDate,
+	}
 }
 
 // fetchContent fetches content from any supported URL (Tidal, Qobuz, etc.).
