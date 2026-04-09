@@ -662,6 +662,8 @@ func (q *QobuzSource) SearchTrackByISRC(isrc string) (*SourceTrack, error) {
 }
 
 // SearchTrackByTitleArtist searches Qobuz by title and artist name.
+// If the track search returns no results, falls back to an album search
+// using the album name and artist, then matches the track within the album.
 func (q *QobuzSource) SearchTrackByTitleArtist(title, artist string) (*SourceTrack, error) {
 	query := title
 	if artist != "" {
@@ -682,10 +684,59 @@ func (q *QobuzSource) SearchTrackByTitleArtist(title, artist string) (*SourceTra
 		return nil, fmt.Errorf("failed to parse search response: %w", err)
 	}
 
-	if len(result.Tracks.Items) == 0 {
-		return nil, fmt.Errorf("no Qobuz track found for '%s - %s'", artist, title)
+	if len(result.Tracks.Items) > 0 {
+		return q.convertTrack(&result.Tracks.Items[0]), nil
 	}
-	return q.convertTrack(&result.Tracks.Items[0]), nil
+
+	// Fallback: search albums by artist + title, then find matching track
+	return q.searchTrackViaAlbumFallback(title, artist)
+}
+
+// qobuzAlbumSearchResponse wraps the catalog/search albums result.
+type qobuzAlbumSearchResponse struct {
+	Albums struct {
+		Items []qobuzAlbumResponse `json:"items"`
+	} `json:"albums"`
+}
+
+// searchTrackViaAlbumFallback searches for albums matching the artist,
+// then looks for a track with a matching title within the album.
+func (q *QobuzSource) searchTrackViaAlbumFallback(title, artist string) (*SourceTrack, error) {
+	albumQuery := artist
+	if albumQuery == "" {
+		albumQuery = title
+	}
+	params := url.Values{}
+	params.Set("query", albumQuery)
+	params.Set("type", "albums")
+	params.Set("limit", "5")
+
+	body, err := q.makeRequest("catalog/search", params)
+	if err != nil {
+		return nil, fmt.Errorf("album fallback search failed: %w", err)
+	}
+
+	var result qobuzAlbumSearchResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse album search response: %w", err)
+	}
+
+	titleLower := strings.ToLower(title)
+	for _, album := range result.Albums.Items {
+		// Fetch full album to get tracks
+		fullAlbum, err := q.GetAlbum(album.ID)
+		if err != nil {
+			continue
+		}
+		for _, track := range fullAlbum.Tracks {
+			if strings.EqualFold(track.Title, titleLower) || strings.Contains(strings.ToLower(track.Title), titleLower) {
+				matched := track
+				return &matched, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("no Qobuz track found for '%s - %s' (including album fallback)", artist, title)
 }
 
 // buildFilename creates a filename from template

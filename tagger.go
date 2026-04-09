@@ -19,7 +19,8 @@ type FLACTagger struct {
 // TrackMetadata contains metadata to embed in FLAC file
 type TrackMetadata struct {
 	Title       string
-	Artist      string
+	Artist      string   // Primary/joined artist string
+	Artists     []string // Individual artist names (for split mode)
 	AlbumArtist string
 	Album       string
 	TrackNumber int
@@ -30,13 +31,18 @@ type TrackMetadata struct {
 	Genre       string
 	ISRC        string
 	CoverURL    string
+	CoverArt    []byte // Raw cover art data (used by MP3 tagger)
+	Composer    string // Composer (TCOM in ID3v2)
 	// Lyrics fields
 	Lyrics       string // Plain text lyrics (LYRICS tag)
 	SyncedLyrics string // LRC format synced lyrics (SYNCEDLYRICS tag)
 	OriginalDate string // Original release date (ORIGINALDATE tag)
 	// Rights fields
 	Copyright string // COPYRIGHT Vorbis comment
-	Label     string // ORGANIZATION Vorbis comment (record label)
+	Label   string // ORGANIZATION Vorbis comment (record label)
+	Comment string // COMMENT Vorbis comment
+	// Tagging options
+	ArtistTagMode string // "joined" or "split" — controls Vorbis ARTIST field handling
 }
 
 // NewFLACTagger creates a new FLAC tagger
@@ -168,7 +174,13 @@ func (t *FLACTagger) createVorbisComment(meta TrackMetadata) []byte {
 	if meta.Title != "" {
 		comments = append(comments, fmt.Sprintf("TITLE=%s", meta.Title))
 	}
-	if meta.Artist != "" {
+	if meta.ArtistTagMode == "split" && len(meta.Artists) > 1 {
+		for _, a := range meta.Artists {
+			if a != "" {
+				comments = append(comments, fmt.Sprintf("ARTIST=%s", a))
+			}
+		}
+	} else if meta.Artist != "" {
 		comments = append(comments, fmt.Sprintf("ARTIST=%s", meta.Artist))
 	}
 	if meta.Album != "" {
@@ -207,6 +219,12 @@ func (t *FLACTagger) createVorbisComment(meta TrackMetadata) []byte {
 	}
 	if meta.Label != "" {
 		comments = append(comments, fmt.Sprintf("ORGANIZATION=%s", meta.Label))
+	}
+	if meta.Composer != "" {
+		comments = append(comments, fmt.Sprintf("COMPOSER=%s", meta.Composer))
+	}
+	if meta.Comment != "" {
+		comments = append(comments, fmt.Sprintf("COMMENT=%s", meta.Comment))
 	}
 	// Add lyrics tags
 	if meta.Lyrics != "" {
@@ -285,6 +303,14 @@ func writeBlockSize(w *bytes.Buffer, size int) {
 	w.WriteByte(byte((size >> 16) & 0xFF))
 	w.WriteByte(byte((size >> 8) & 0xFF))
 	w.WriteByte(byte(size & 0xFF))
+}
+
+// RebuildPreservingCover rebuilds a FLAC file with new metadata while preserving the existing cover art.
+func (t *FLACTagger) RebuildPreservingCover(data []byte, meta TrackMetadata) ([]byte, error) {
+	if len(data) < 4 || string(data[:4]) != "fLaC" {
+		return nil, fmt.Errorf("not a valid FLAC file")
+	}
+	return t.rebuildWithLyrics(data, meta)
 }
 
 // EmbedLyrics embeds lyrics into an existing FLAC file

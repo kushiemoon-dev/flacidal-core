@@ -62,10 +62,14 @@ type Config struct {
 	// Metadata formatting
 	FirstArtistOnly   bool   `json:"firstArtistOnly"`           // Use only the first artist in tags and filenames
 	ArtistSeparator   string `json:"artistSeparator,omitempty"` // Separator for multiple artists (default "; ")
+	ArtistTagMode     string `json:"artistTagMode,omitempty"`   // "joined" (default) or "split" (separate ARTIST tags per artist)
 	PlaylistSubfolder bool   `json:"playlistSubfolder"`         // Create subfolder for playlist downloads
 
 	// Smart skip
 	SkipExisting bool `json:"skipExisting"` // Skip downloading files that already exist (ISRC match)
+
+	// Folder separation
+	SeparateSingles bool `json:"separateSingles"` // Separate singles from albums into different folders
 
 	// Region
 	CountryCode string `json:"countryCode,omitempty"` // Country code for Tidal API (default "US")
@@ -99,6 +103,7 @@ var defaultConfig = Config{
 	SkipExisting:        true,
 	PlaylistSubfolder:   true,
 	ArtistSeparator:     "; ",
+	ArtistTagMode:       "joined",
 	CountryCode:         "US",
 }
 

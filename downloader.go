@@ -117,6 +117,7 @@ type TidalHifiTrackResponse struct {
 			Type string `json:"type"`
 		} `json:"artists"`
 		NumberOfVolumes int `json:"numberOfVolumes"`
+		NumberOfTracks  int `json:"numberOfTracks"`
 	} `json:"album"`
 }
 
@@ -187,6 +188,7 @@ type DownloadOptions struct {
 	PlaylistSubfolder    bool     // Create subfolder for playlist downloads
 	SaveLyricsFile       bool     // Save lyrics as separate .lrc file
 	SaveFolderCover      bool     // Save folder.jpg in album directory
+	SeparateSingles      bool     // Separate singles from albums into different folders
 }
 
 // qualityFallbackChain defines the descending quality order used for auto-fallback.
@@ -1155,7 +1157,21 @@ func (t *TidalHifiService) DownloadTrack(trackID int, outputDir string, copyrigh
 
 	// Determine output path based on options
 	finalDir := outputDir
-	if t.options.FolderTemplate != "" {
+	if t.options.SeparateSingles {
+		// Separate singles (1 track) from albums
+		isSingle := track.Album.NumberOfTracks <= 1
+		if isSingle {
+			safeArtist := SanitizeFileName(artistName)
+			finalDir = filepath.Join(outputDir, "Singles", safeArtist)
+		} else {
+			safeArtist := SanitizeFileName(artistName)
+			safeAlbum := SanitizeFileName(track.Album.Title)
+			if safeAlbum == "" {
+				safeAlbum = "Unknown Album"
+			}
+			finalDir = filepath.Join(outputDir, "Albums", safeArtist, safeAlbum)
+		}
+	} else if t.options.FolderTemplate != "" {
 		// Template-based folder structure
 		subDir := t.applyFolderTemplate(t.options.FolderTemplate, track, artistName)
 		if subDir != "" {
@@ -1530,16 +1546,22 @@ func FormatCoverUUID(uuid string) string {
 
 // DownloadedFileInfo represents metadata for a downloaded file
 type DownloadedFileInfo struct {
-	Path    string `json:"path"`
-	Name    string `json:"name"`
-	Size    int64  `json:"size"`
-	ModTime string `json:"modTime"`
-	Title   string `json:"title"`
-	Artist  string `json:"artist"`
-	Album   string `json:"album"`
+	Path        string `json:"path"`
+	Name        string `json:"name"`
+	Size        int64  `json:"size"`
+	ModTime     string `json:"modTime"`
+	Title       string `json:"title"`
+	Artist      string `json:"artist"`
+	Album       string `json:"album"`
+	Source      string `json:"source"`      // tidal, qobuz, or unknown
+	Quality     string `json:"quality"`     // e.g. "16-bit/44.1kHz"
+	Format      string `json:"format"`      // file extension: flac, mp3, opus
+	DiscNumber  int    `json:"discNumber"`  // disc number for grouping
+	TrackNumber int    `json:"trackNumber"` // track number for ordering
 }
 
 // ListFLACFiles lists all FLAC files in the given directory recursively
+// with enriched metadata from FLAC stream info and Vorbis comments.
 func ListFLACFiles(folder string) ([]DownloadedFileInfo, error) {
 	var files []DownloadedFileInfo
 	err := filepath.WalkDir(folder, func(path string, d fs.DirEntry, err error) error {
@@ -1557,25 +1579,83 @@ func ListFLACFiles(folder string) ([]DownloadedFileInfo, error) {
 		if infoErr != nil {
 			return nil
 		}
-		title, artist := "", ""
-		baseName := strings.TrimSuffix(name, ".flac")
-		if parts := strings.SplitN(baseName, " - ", 2); len(parts) == 2 {
-			artist = parts[0]
-			title = parts[1]
-		} else {
-			title = baseName
-		}
-		files = append(files, DownloadedFileInfo{
+
+		fileInfo := DownloadedFileInfo{
 			Path:    path,
 			Name:    name,
 			Size:    info.Size(),
 			ModTime: info.ModTime().Format("2006-01-02T15:04:05Z07:00"),
-			Title:   title,
-			Artist:  artist,
-		})
+			Format:  "flac",
+			Source:  "unknown",
+		}
+
+		// Try reading FLAC metadata for enriched info
+		meta, metaErr := ReadFLACMetadata(path)
+		if metaErr == nil {
+			fileInfo.Title = meta.Title
+			fileInfo.Artist = meta.Artist
+			fileInfo.Album = meta.Album
+			fileInfo.TrackNumber = parseTrackNum(meta.TrackNumber)
+			fileInfo.DiscNumber = parseTrackNum(meta.DiscNumber)
+			// Quality from stream info
+			if meta.BitDepth > 0 && meta.SampleRate > 0 {
+				sampleRateKHz := float64(meta.SampleRate) / 1000.0
+				if sampleRateKHz == float64(int(sampleRateKHz)) {
+					fileInfo.Quality = fmt.Sprintf("%d-bit/%gkHz", meta.BitDepth, sampleRateKHz)
+				} else {
+					fileInfo.Quality = fmt.Sprintf("%d-bit/%.1fkHz", meta.BitDepth, sampleRateKHz)
+				}
+			}
+			// Source from ISRC prefix or comment heuristics
+			fileInfo.Source = inferSource(meta)
+		} else {
+			// Fallback: parse from filename
+			baseName := strings.TrimSuffix(name, ".flac")
+			if parts := strings.SplitN(baseName, " - ", 2); len(parts) == 2 {
+				fileInfo.Artist = parts[0]
+				fileInfo.Title = parts[1]
+			} else {
+				fileInfo.Title = baseName
+			}
+		}
+
+		files = append(files, fileInfo)
 		return nil
 	})
 	return files, err
+}
+
+// inferSource tries to determine the download source from metadata.
+func inferSource(meta *FLACMetadata) string {
+	// Check comment field for source hints
+	comment := strings.ToLower(meta.Comment)
+	if strings.Contains(comment, "tidal") {
+		return "tidal"
+	}
+	if strings.Contains(comment, "qobuz") {
+		return "qobuz"
+	}
+	// Tidal files typically have ISRCs; Qobuz too, but Tidal is default source
+	if meta.ISRC != "" {
+		return "tidal"
+	}
+	return "unknown"
+}
+
+// parseTrackNum extracts the track number from a string like "3" or "3/12".
+func parseTrackNum(s string) int {
+	if s == "" {
+		return 0
+	}
+	// Handle "3/12" format
+	parts := strings.SplitN(s, "/", 2)
+	n, err := fmt.Sscanf(parts[0], "%d", new(int))
+	if err != nil || n == 0 {
+		return 0
+	}
+	var val int
+	fmt.Sscanf(parts[0], "%d", &val)
+	return val
 }
 
 // DeleteFile deletes a file from the filesystem
