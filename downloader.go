@@ -1649,10 +1649,6 @@ func parseTrackNum(s string) int {
 	}
 	// Handle "3/12" format
 	parts := strings.SplitN(s, "/", 2)
-	n, err := fmt.Sscanf(parts[0], "%d", new(int))
-	if err != nil || n == 0 {
-		return 0
-	}
 	var val int
 	fmt.Sscanf(parts[0], "%d", &val)
 	return val

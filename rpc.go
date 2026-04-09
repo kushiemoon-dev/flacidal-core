@@ -87,6 +87,7 @@ func (c *Core) dispatch(method string, params json.RawMessage) (interface{}, err
 		c.config.ArtistSeparator = opts.ArtistSeparator
 		c.config.PlaylistSubfolder = opts.PlaylistSubfolder
 		c.config.SaveLyricsFile = opts.SaveLyricsFile
+		c.config.SeparateSingles = opts.SeparateSingles
 		if err := SaveConfig(c.config); err != nil {
 			return nil, fmt.Errorf("failed to save config: %w", err)
 		}

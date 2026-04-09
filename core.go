@@ -109,6 +109,7 @@ func NewCore(dataDir string) (*Core, error) {
 		ArtistSeparator:      config.ArtistSeparator,
 		PlaylistSubfolder:    config.PlaylistSubfolder,
 		SaveLyricsFile:       config.SaveLyricsFile,
+		SeparateSingles:      config.SeparateSingles,
 	})
 
 	// Initialize download manager
