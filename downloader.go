@@ -626,6 +626,65 @@ func (t *TidalHifiService) getStreamURLWithFallback(trackID int, startQuality st
 	return nil, "", fmt.Errorf("all quality levels failed: %v", lastErr)
 }
 
+// searchQueryVariants returns the original query plus a normalized variant for
+// short all-alpha queries that may represent compressed artist names (e.g. "acdc" → "ac/dc").
+// The variant is only added when it differs from the original.
+func searchQueryVariants(query string) []string {
+	variants := []string{query}
+
+	// Only generate variants for short queries with no spaces or slashes
+	q := strings.ToLower(strings.TrimSpace(query))
+	if strings.ContainsAny(q, " /\\-") || len(q) < 3 || len(q) > 8 {
+		return variants
+	}
+
+	// Check it's all alphabetic (band abbreviations like acdc, rhcp, ratm…)
+	allAlpha := true
+	for _, c := range q {
+		if c < 'a' || c > 'z' {
+			allAlpha = false
+			break
+		}
+	}
+	if !allAlpha {
+		return variants
+	}
+
+	// Try inserting "/" at the midpoint (acdc → ac/dc)
+	mid := len(q) / 2
+	variant := q[:mid] + "/" + q[mid:]
+	variants = append(variants, variant)
+	return variants
+}
+
+// mergeTrackResults merges two slices of track results, deduplicating by track ID.
+// Tracks with ID=0 are deduplicated by title+artist instead.
+func mergeTrackResults(a, b []TidalHifiTrackResponse) []TidalHifiTrackResponse {
+	seen := make(map[string]struct{}, len(a))
+	out := make([]TidalHifiTrackResponse, 0, len(a)+len(b))
+	key := func(t TidalHifiTrackResponse) string {
+		if t.ID != 0 {
+			return fmt.Sprintf("id:%d", t.ID)
+		}
+		return "t:" + strings.ToLower(t.Title+"|"+t.Artist.Name)
+	}
+	for _, t := range a {
+		k := key(t)
+		if _, exists := seen[k]; !exists {
+			seen[k] = struct{}{}
+			out = append(out, t)
+		}
+	}
+	for _, t := range b {
+		k := key(t)
+		if _, exists := seen[k]; !exists {
+			seen[k] = struct{}{}
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // parseSearchBody extracts track items from a Tidal search response body.
 func parseSearchBody(body []byte) ([]TidalHifiTrackResponse, error) {
 	var result struct {
@@ -663,25 +722,33 @@ func (t *TidalHifiService) SearchTrack(query string) (*TidalHifiTrackResponse, e
 	return &items[0], nil
 }
 
-// SearchTracks searches for tracks on Tidal via vogel and returns multiple results
+// SearchTracks searches for tracks on Tidal via vogel and returns multiple results.
+// For short all-alpha queries (e.g. "acdc"), also tries a normalized variant (e.g. "ac/dc")
+// and merges the results so that artist-based matches are included.
 func (t *TidalHifiService) SearchTracks(query string, limit int) ([]TidalHifiTrackResponse, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 
-	body, err := t.makeAPIRequest("/search/?s=" + url.QueryEscape(query))
-	if err != nil {
-		return nil, fmt.Errorf("search request failed: %w", err)
+	var merged []TidalHifiTrackResponse
+	for _, q := range searchQueryVariants(query) {
+		body, err := t.makeAPIRequest("/search/?s=" + url.QueryEscape(q))
+		if err != nil {
+			continue
+		}
+		items, err := parseSearchBody(body)
+		if err != nil {
+			continue
+		}
+		merged = mergeTrackResults(merged, items)
 	}
-
-	items, err := parseSearchBody(body)
-	if err != nil {
-		return nil, err
+	if len(merged) == 0 {
+		return nil, fmt.Errorf("search request failed for query: %s", query)
 	}
-	if len(items) > limit {
-		items = items[:limit]
+	if len(merged) > limit {
+		merged = merged[:limit]
 	}
-	return items, nil
+	return merged, nil
 }
 
 // SearchAlbumsFromProxy searches for albums via the proxy by extracting unique albums
@@ -691,14 +758,20 @@ func (t *TidalHifiService) SearchAlbumsFromProxy(query string, limit int) ([]Tid
 		limit = 20
 	}
 
-	body, err := t.makeAPIRequest("/search/?s=" + url.QueryEscape(query))
-	if err != nil {
-		return nil, fmt.Errorf("album search failed: %w", err)
+	var items []TidalHifiTrackResponse
+	for _, q := range searchQueryVariants(query) {
+		body, err := t.makeAPIRequest("/search/?s=" + url.QueryEscape(q))
+		if err != nil {
+			continue
+		}
+		got, err := parseSearchBody(body)
+		if err != nil {
+			continue
+		}
+		items = mergeTrackResults(items, got)
 	}
-
-	items, err := parseSearchBody(body)
-	if err != nil {
-		return nil, err
+	if len(items) == 0 {
+		return nil, fmt.Errorf("album search failed for query: %s", query)
 	}
 
 	seen := make(map[string]struct{})
@@ -742,14 +815,20 @@ func (t *TidalHifiService) SearchArtistsFromProxy(query string, limit int) ([]Ti
 		limit = 20
 	}
 
-	body, err := t.makeAPIRequest("/search/?s=" + url.QueryEscape(query))
-	if err != nil {
-		return nil, fmt.Errorf("artist search failed: %w", err)
+	var items []TidalHifiTrackResponse
+	for _, q := range searchQueryVariants(query) {
+		body, err := t.makeAPIRequest("/search/?s=" + url.QueryEscape(q))
+		if err != nil {
+			continue
+		}
+		got, err := parseSearchBody(body)
+		if err != nil {
+			continue
+		}
+		items = mergeTrackResults(items, got)
 	}
-
-	items, err := parseSearchBody(body)
-	if err != nil {
-		return nil, err
+	if len(items) == 0 {
+		return nil, fmt.Errorf("artist search failed for query: %s", query)
 	}
 
 	seen := make(map[string]struct{})
