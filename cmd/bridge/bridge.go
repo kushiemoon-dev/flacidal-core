@@ -30,7 +30,21 @@ var (
 	app         *core.Core
 	hasCallback bool
 	mu          sync.Mutex
+	cbMu        sync.Mutex // serialises all invokeCallback calls
 )
+
+// sendCallback allocates a C string and posts it to Dart's NativeCallable
+// listener under a mutex. Serialising posts prevents concurrent goroutines
+// from racing through the CGo ↔ Dart message-delivery path and causing the
+// same pointer to be enqueued twice (leading to a double-free in FlacFree).
+// The lock is held only for the duration of the allocation + post; Dart
+// frees the pointer asynchronously via FlacFree after reading.
+func sendCallback(data string) {
+	cbMu.Lock()
+	cstr := C.CString(data)
+	C.invokeCallback(cstr)
+	cbMu.Unlock()
+}
 
 //export FlacInit
 func FlacInit(dataDir *C.char) *C.char {
@@ -53,11 +67,7 @@ func FlacInit(dataDir *C.char) *C.char {
 		if err != nil {
 			return
 		}
-		cstr := C.CString(string(data))
-		C.invokeCallback(cstr)
-		// Do NOT free here — Dart's NativeCallable.listener processes
-		// callbacks asynchronously; the pointer must remain valid until
-		// Dart copies the string. Dart calls FlacFree after reading.
+		sendCallback(string(data))
 	})
 
 	return C.CString(`{"result":{"status":"ok"}}`)
@@ -77,10 +87,7 @@ func FlacCall(methodJSON *C.char) *C.char {
 func FlacCallAsync(methodJSON *C.char, requestID C.int) {
 	if app == nil {
 		if hasCallback {
-			errJSON := marshalAsyncResponse(int(requestID), marshalErr("NOT_INITIALIZED", "call FlacInit first"))
-			cstr := C.CString(errJSON)
-			C.invokeCallback(cstr)
-			// Dart frees via FlacFree after reading
+			sendCallback(marshalAsyncResponse(int(requestID), marshalErr("NOT_INITIALIZED", "call FlacInit first")))
 		}
 		return
 	}
@@ -89,10 +96,7 @@ func FlacCallAsync(methodJSON *C.char, requestID C.int) {
 	go func() {
 		result := app.HandleRPC(input)
 		if hasCallback {
-			resp := marshalAsyncResponse(id, result)
-			cstr := C.CString(resp)
-			C.invokeCallback(cstr)
-			// Dart frees via FlacFree after reading
+			sendCallback(marshalAsyncResponse(id, result))
 		}
 	}()
 }
