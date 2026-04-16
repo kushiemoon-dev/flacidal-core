@@ -43,7 +43,8 @@ func NewEndpointPool(urls []string, blacklistDur time.Duration) *EndpointPool {
 		entries:      entries,
 		blacklistDur: blacklistDur,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: NewFallbackTransport(),
 		},
 		userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
 	}

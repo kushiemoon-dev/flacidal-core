@@ -50,6 +50,7 @@ type DownloadManager struct {
 	autoSelectService bool
 	youtubeEnabled    bool
 	cobaltSource      *CobaltSource
+	logger            *LogBuffer
 }
 
 // DownloadJob represents a single download task
@@ -114,11 +115,26 @@ func (dm *DownloadManager) SetFallbackQobuzSource(source *QobuzSource) {
 	dm.qobuzSource = source
 }
 
+// SetLogger attaches a log buffer so panic stack traces and worker errors are visible in the Terminal page.
+func (dm *DownloadManager) SetLogger(logger *LogBuffer) {
+	dm.logger = logger
+}
+
 // SetSourceOrder sets the priority order for sources, e.g. ["tidal", "qobuz"].
+// When Qobuz appears in the order, auto-select is enabled so it takes priority
+// over Tidal for tracks that don't have an explicit source set.
 func (dm *DownloadManager) SetSourceOrder(order []string) {
 	if len(order) > 0 {
 		dm.sourceOrder = order
 	}
+	hasQobuz := false
+	for _, s := range dm.sourceOrder {
+		if s == "qobuz" {
+			hasQobuz = true
+			break
+		}
+	}
+	dm.autoSelectService = hasQobuz
 }
 
 // SetProgressCallback sets the callback for progress updates
@@ -235,7 +251,25 @@ func (dm *DownloadManager) worker(id int) {
 			return
 		}
 
-		dm.processJob(job)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					errMsg := fmt.Sprintf("panic in download worker: %v", r)
+					if dm.logger != nil {
+						dm.logger.Error(errMsg)
+					}
+					if dm.onProgress != nil {
+						dm.onProgress(job.TrackID, "error", &DownloadResult{
+							TrackID: job.TrackID,
+							Title:   job.Title,
+							Artist:  job.Artist,
+							Error:   errMsg,
+						})
+					}
+				}
+			}()
+			dm.processJob(job)
+		}()
 	}
 }
 
@@ -299,13 +333,30 @@ func (dm *DownloadManager) processJob(job *DownloadJob) {
 	// Download — route by source
 	var result *DownloadResult
 	var err error
-	if job.Source == "qobuz" && dm.qobuzSource != nil && dm.qobuzSource.IsAvailable() {
+	effectiveSource := dm.selectBestService(job)
+	if effectiveSource == "qobuz" && dm.qobuzSource != nil && dm.qobuzSource.IsAvailable() {
 		opts := dm.service.GetOptions()
-		result, err = dm.qobuzSource.DownloadTrack(
-			strconv.Itoa(job.TrackID), job.OutputDir, opts,
-		)
-		if result != nil {
-			result.Source = "qobuz"
+		if job.Source == "qobuz" {
+			// TrackID is already a Qobuz ID — download directly
+			result, err = dm.qobuzSource.DownloadTrack(
+				strconv.Itoa(job.TrackID), job.OutputDir, opts,
+			)
+			if result != nil {
+				result.Source = "qobuz"
+			}
+		} else {
+			// TrackID is a Tidal ID — look up by ISRC first, then by title+artist
+			result, err = dm.downloadViaQobuzFallback(job, nil)
+		}
+		// Fall back to Tidal when Qobuz fails (e.g. proxy unavailable)
+		if err != nil || (result != nil && !result.Success) {
+			if dm.logger != nil {
+				dm.logger.Warn(fmt.Sprintf("Qobuz primary failed for '%s - %s', falling back to Tidal", job.Artist, job.Title))
+			}
+			tidalResult, tidalErr := dm.service.DownloadTrack(job.TrackID, job.OutputDir, job.Copyright, job.Label)
+			if tidalErr == nil && tidalResult != nil && tidalResult.Success {
+				result, err = tidalResult, nil
+			}
 		}
 	} else {
 		result, err = dm.service.DownloadTrack(job.TrackID, job.OutputDir, job.Copyright, job.Label)
@@ -455,12 +506,16 @@ func (dm *DownloadManager) qobuzFallbackEnabled() bool {
 	return false
 }
 
-// downloadViaQobuzFallback attempts to download a track via Qobuz when Tidal fails.
-// It uses the ISRC for matching, falling back to title+artist search.
+// downloadViaQobuzFallback downloads a track via Qobuz by ISRC or title+artist lookup.
+// tidalResult is the previous attempt result (may be nil when Qobuz is the primary source).
 func (dm *DownloadManager) downloadViaQobuzFallback(job *DownloadJob, tidalResult *DownloadResult) (*DownloadResult, error) {
 	logger := dm.service.logger
 	if logger != nil {
-		logger.Warn(fmt.Sprintf("Tidal failed for '%s - %s', falling back to Qobuz", job.Artist, job.Title))
+		if tidalResult != nil {
+			logger.Warn(fmt.Sprintf("Tidal failed for '%s - %s', falling back to Qobuz", job.Artist, job.Title))
+		} else {
+			logger.Info(fmt.Sprintf("Downloading '%s - %s' via Qobuz (primary)", job.Artist, job.Title))
+		}
 	}
 
 	// Find the track on Qobuz
@@ -473,7 +528,7 @@ func (dm *DownloadManager) downloadViaQobuzFallback(job *DownloadJob, tidalResul
 		qTrack, err = dm.qobuzSource.SearchTrackByTitleArtist(job.Title, job.Artist)
 		if err != nil {
 			if logger != nil {
-				logger.Error(fmt.Sprintf("Qobuz fallback: track not found ('%s - %s'): %v", job.Artist, job.Title, err))
+				logger.Error(fmt.Sprintf("Qobuz: track not found ('%s - %s'): %v", job.Artist, job.Title, err))
 			}
 			return tidalResult, err
 		}

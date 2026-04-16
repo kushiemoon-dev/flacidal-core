@@ -29,6 +29,10 @@ var defaultQobuzEndpoints = []string{
 	"https://www.qobuz.com/api.json/0.2",
 }
 
+// defaultQobuzAppID is the built-in app ID used when no user credentials are provided.
+// This allows catalog search to work out-of-the-box. Downloads use community proxies.
+const defaultQobuzAppID = "312369995"
+
 // defaultQobuzProxyEndpoints are credential-free community proxy endpoints.
 var defaultQobuzProxyEndpoints = []string{
 	"https://dab.yeet.su/api/stream",
@@ -149,6 +153,9 @@ type qobuzFileURLResponse struct {
 
 // NewQobuzSource creates a new Qobuz source
 func NewQobuzSource(appID, appSecret string) *QobuzSource {
+	if appID == "" {
+		appID = defaultQobuzAppID
+	}
 	q := &QobuzSource{
 		client: &http.Client{
 			Timeout: 30 * time.Second,
@@ -793,6 +800,119 @@ func (q *QobuzSource) searchTrackViaAlbumFallback(title, artist string) (*Source
 	}
 
 	return nil, fmt.Errorf("no Qobuz track found for '%s - %s' (including album fallback)", artist, title)
+}
+
+// qobuzArtistSearchResponse wraps the catalog/search artists result.
+type qobuzArtistSearchResponse struct {
+	Artists struct {
+		Items []struct {
+			ID   int    `json:"id"`
+			Name string `json:"name"`
+			Image struct {
+				Large string `json:"large"`
+			} `json:"image"`
+		} `json:"items"`
+	} `json:"artists"`
+}
+
+// SearchTracks searches Qobuz catalog for tracks matching the query.
+func (q *QobuzSource) SearchTracks(query string, limit int) ([]SourceTrack, error) {
+	if q.appID == "" {
+		return nil, fmt.Errorf("Qobuz app_id not configured")
+	}
+	params := url.Values{}
+	params.Set("query", query)
+	params.Set("type", "tracks")
+	params.Set("limit", strconv.Itoa(limit))
+
+	body, err := q.makeRequest("catalog/search", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var result qobuzSearchResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse search response: %w", err)
+	}
+
+	tracks := make([]SourceTrack, len(result.Tracks.Items))
+	for i, item := range result.Tracks.Items {
+		tracks[i] = *q.convertTrack(&item)
+	}
+	return tracks, nil
+}
+
+// SearchAlbums searches Qobuz catalog for albums matching the query.
+func (q *QobuzSource) SearchAlbums(query string, limit int) ([]SourceAlbum, error) {
+	if q.appID == "" {
+		return nil, fmt.Errorf("Qobuz app_id not configured")
+	}
+	params := url.Values{}
+	params.Set("query", query)
+	params.Set("type", "albums")
+	params.Set("limit", strconv.Itoa(limit))
+
+	body, err := q.makeRequest("catalog/search", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var result qobuzAlbumSearchResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse album search response: %w", err)
+	}
+
+	albums := make([]SourceAlbum, len(result.Albums.Items))
+	for i, a := range result.Albums.Items {
+		year := ""
+		if a.ReleaseDateOriginal != "" && len(a.ReleaseDateOriginal) >= 4 {
+			year = a.ReleaseDateOriginal[:4]
+		}
+		albums[i] = SourceAlbum{
+			ID:         a.ID,
+			Title:      a.Title,
+			Artist:     a.Artist.Name,
+			Year:       year,
+			Genre:      a.Genre.Name,
+			CoverURL:   a.Image.Large,
+			TrackCount: a.TracksCount,
+			Source:     "qobuz",
+			SourceURL:  fmt.Sprintf("https://play.qobuz.com/album/%s", a.ID),
+		}
+	}
+	return albums, nil
+}
+
+// SearchArtists searches Qobuz catalog for artists matching the query.
+func (q *QobuzSource) SearchArtists(query string, limit int) ([]map[string]interface{}, error) {
+	if q.appID == "" {
+		return nil, fmt.Errorf("Qobuz app_id not configured")
+	}
+	params := url.Values{}
+	params.Set("query", query)
+	params.Set("type", "artists")
+	params.Set("limit", strconv.Itoa(limit))
+
+	body, err := q.makeRequest("catalog/search", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var result qobuzArtistSearchResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse artist search response: %w", err)
+	}
+
+	artists := make([]map[string]interface{}, len(result.Artists.Items))
+	for i, a := range result.Artists.Items {
+		artists[i] = map[string]interface{}{
+			"id":         strconv.Itoa(a.ID),
+			"name":       a.Name,
+			"pictureUrl": a.Image.Large,
+			"source":     "qobuz",
+		}
+	}
+	return artists, nil
 }
 
 // buildFilename creates a filename from template

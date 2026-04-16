@@ -184,12 +184,10 @@ var qualityFallbackChain = []string{"HI_RES", "LOSSLESS", "HIGH"}
 
 // NewTidalHifiService creates a new Tidal HiFi download service
 func NewTidalHifiService() *TidalHifiService {
-	// Transport with connection pooling for downloads
-	downloadTransport := &http.Transport{
-		MaxIdleConns:        10,
-		MaxIdleConnsPerHost: 5,
-		IdleConnTimeout:     90 * time.Second,
-	}
+	// Use fallback transport so DoH resolves sinkholed proxy domains
+	downloadTransport := NewFallbackTransport()
+	downloadTransport.MaxIdleConns = 10
+	downloadTransport.MaxIdleConnsPerHost = 5
 
 	svc := &TidalHifiService{
 		pool:     NewEndpointPool(defaultTidalHifiEndpoints, 5*time.Minute),
@@ -222,6 +220,11 @@ func (t *TidalHifiService) SetProxy(proxyURLStr string) error {
 	transport, err := BuildProxyTransport(proxyURLStr)
 	if err != nil {
 		return err
+	}
+	// When no proxy is configured, keep the DoH fallback dialer so sinkholed
+	// proxy domains still resolve correctly via Cloudflare/Google DoH.
+	if transport == nil {
+		transport = NewFallbackTransport()
 	}
 	apiClient := &http.Client{
 		Timeout:   30 * time.Second,

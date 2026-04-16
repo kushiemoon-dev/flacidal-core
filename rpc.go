@@ -181,6 +181,45 @@ func (c *Core) dispatch(method string, params json.RawMessage) (interface{}, err
 		}
 		return c.tidalSource.SearchArtists(p.Query, p.Limit)
 
+	case "searchQobuz":
+		var p struct {
+			Query string `json:"query"`
+			Limit int    `json:"limit"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if p.Limit <= 0 {
+			p.Limit = 20
+		}
+		return c.qobuzSource.SearchTracks(p.Query, p.Limit)
+
+	case "searchQobuzAlbums":
+		var p struct {
+			Query string `json:"query"`
+			Limit int    `json:"limit"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if p.Limit <= 0 {
+			p.Limit = 20
+		}
+		return c.qobuzSource.SearchAlbums(p.Query, p.Limit)
+
+	case "searchQobuzArtists":
+		var p struct {
+			Query string `json:"query"`
+			Limit int    `json:"limit"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if p.Limit <= 0 {
+			p.Limit = 20
+		}
+		return c.qobuzSource.SearchArtists(p.Query, p.Limit)
+
 	// ── Download Queue ──────────────────────────────────────
 	case "queueDownloads":
 		var p struct {
@@ -762,7 +801,7 @@ func (c *Core) dispatch(method string, params json.RawMessage) (interface{}, err
 		return map[string]string{"status": "ok"}, nil
 
 	case "getVersion":
-		return map[string]string{"version": "0.4.0"}, nil
+		return map[string]string{"version": "0.4.5"}, nil
 
 	case "getCacheStats":
 		if c.db == nil {
